@@ -1,0 +1,315 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+enum Role {
+  ADMIN
+  USER
+}
+
+enum SupplierCategory {
+  CNC_MACHINES
+  MANUFACTURING_EQUIPMENT
+  SPARE_PARTS
+  MAINTENANCE_SERVICES
+  OTHER
+}
+
+enum TransactionType {
+  MACHINE
+  SPARE_PART
+  SERVICE
+}
+
+enum ProjectStatus {
+  LEAD
+  QUOTATION
+  NEGOTIATION
+  WON
+  IN_PROGRESS
+  COMPLETED
+  LOST
+}
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum MouStatus {
+  DRAFT
+  SIGNED
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOID
+}
+
+enum ExpenseCategory {
+  MACHINE_PURCHASE
+  SPARE_PARTS
+  SHIPPING_LOGISTICS
+  INSTALLATION
+  TECHNICIAN_SERVICE
+  TRANSPORTATION
+  OPERATIONAL
+  OTHER
+}
+
+// ---------- Users ----------
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(USER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ---------- Master data ----------
+model Customer {
+  id            String    @id @default(cuid())
+  companyName   String
+  industry      String?
+  contactPerson String
+  phone         String?
+  email         String?
+  address       String?
+  taxId         String? // NPWP
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  projects      Project[]
+  invoices      Invoice[]
+  supplierLink  Supplier? // disiapkan: perusahaan yang sama dengan supplier
+
+  @@index([companyName])
+  @@index([industry])
+}
+
+model Supplier {
+  id            String           @id @default(cuid())
+  companyName   String
+  category      SupplierCategory
+  contactPerson String?
+  phone         String?
+  email         String?
+  location      String?
+  website       String?
+  notes         String?
+  customerId    String?          @unique
+  customer      Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  projects      Project[]
+  expenses      Expense[]
+
+  @@index([companyName])
+  @@index([category])
+}
+
+// ---------- Projects ----------
+model Project {
+  id                       String          @id @default(cuid())
+  code                     String          @unique // PRJ-2026-0001
+  name                     String
+  customerId               String
+  customer                 Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  supplierId               String?
+  supplier                 Supplier?       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  transactionType          TransactionType
+  description              String?
+  sellingPrice             Decimal         @db.Decimal(18, 2) // estimasi / harga penawaran
+  estimatedPurchaseCost    Decimal         @db.Decimal(18, 2)
+  estimatedAdditionalCosts Decimal         @default(0) @db.Decimal(18, 2)
+  status                   ProjectStatus   @default(LEAD)
+  expectedDeliveryDate     DateTime?
+  notes                    String?
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
+  quotations Quotation[]
+  mou        Mou?
+  invoices   Invoice[]
+  expenses   Expense[]
+  history    ProjectHistory[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([supplierId])
+  @@index([transactionType])
+}
+
+model ProjectHistory {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String?
+  field     String
+  oldValue  String?
+  newValue  String?
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+}
+
+// Counter nomor dokumen per tipe per tahun (PRJ, QUO, MOU, INV)
+model DocumentCounter {
+  type       String
+  year       Int
+  lastNumber Int    @default(0)
+
+  @@id([type, year])
+}
+
+// ---------- Dokumen: Penawaran -> MOU -> Invoice -> Faktur ----------
+model Quotation {
+  id            String          @id @default(cuid())
+  number        String          @unique // QUO-2026-0001
+  projectId     String
+  project       Project         @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  version       Int             @default(1)
+  quotationDate DateTime
+  validUntil    DateTime?
+  amount        Decimal         @db.Decimal(18, 2)
+  status        QuotationStatus @default(DRAFT)
+  notes         String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  mou           Mou?
+
+  @@unique([projectId, version])
+}
+
+model Mou {
+  id          String        @id @default(cuid())
+  number      String        @unique // MOU-2026-0001
+  projectId   String        @unique
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  quotationId String?       @unique
+  quotation   Quotation?    @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  signedDate  DateTime?
+  totalValue  Decimal       @db.Decimal(18, 2) // nilai sebelum PPN
+  status      MouStatus     @default(DRAFT)
+  notes       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  terms       PaymentTerm[]
+}
+
+model PaymentTerm {
+  id             String    @id @default(cuid())
+  mouId          String
+  mou            Mou       @relation(fields: [mouId], references: [id], onDelete: Restrict)
+  sequence       Int
+  name           String // "DP 30%", "Pelunasan"
+  percentage     Decimal?  @db.Decimal(5, 2)
+  amount         Decimal   @db.Decimal(18, 2) // nilai termin sebelum PPN
+  plannedDueDate DateTime?
+  invoice        Invoice?
+
+  @@unique([mouId, sequence])
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  invoiceNumber String        @unique // INV-2026-0001
+  paymentTermId String        @unique
+  paymentTerm   PaymentTerm   @relation(fields: [paymentTermId], references: [id], onDelete: Restrict)
+  projectId     String
+  project       Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  customerId    String
+  customer      Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  invoiceDate   DateTime
+  dueDate       DateTime
+  subtotal      Decimal       @db.Decimal(18, 2) // DPP
+  ppnRate       Decimal       @default(12) @db.Decimal(5, 2)
+  ppnAmount     Decimal       @db.Decimal(18, 2)
+  total         Decimal       @db.Decimal(18, 2) // subtotal + PPN = pendapatan & tagihan
+  status        InvoiceStatus @default(ISSUED)
+  notes         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  faktur        Faktur?
+  payments      Payment[]
+
+  @@index([projectId])
+  @@index([customerId])
+  @@index([dueDate])
+}
+
+model Faktur {
+  id           String   @id @default(cuid())
+  fakturNumber String   @unique // nomor seri faktur pajak, input manual
+  invoiceId    String   @unique
+  invoice      Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  fakturDate   DateTime
+  dpp          Decimal  @db.Decimal(18, 2)
+  ppnAmount    Decimal  @db.Decimal(18, 2)
+  notes        String?
+  createdAt    DateTime @default(now())
+}
+
+model Payment {
+  id        String   @id @default(cuid())
+  invoiceId String
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  amount    Decimal  @db.Decimal(18, 2)
+  paidAt    DateTime
+  method    String?
+  reference String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([paidAt])
+}
+
+// ---------- Pengeluaran ----------
+model Expense {
+  id              String          @id @default(cuid())
+  name            String
+  category        ExpenseCategory
+  projectId       String?
+  project         Project?        @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  supplierId      String?
+  supplier        Supplier?       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  amount          Decimal         @db.Decimal(18, 2)
+  amountPaid      Decimal         @default(0) @db.Decimal(18, 2)
+  transactionDate DateTime
+  notes           String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([projectId])
+  @@index([supplierId])
+  @@index([category])
+  @@index([transactionDate])
+}
+
+// ---------- Settings (satu baris, id = 1) ----------
+model CompanySettings {
+  id          Int      @id @default(1)
+  companyName String
+  logoUrl     String?
+  address     String?
+  phone       String?
+  email       String?
+  currency    String   @default("IDR")
+  dateFormat  String   @default("DD/MM/YYYY")
+  updatedAt   DateTime @updatedAt
+}
